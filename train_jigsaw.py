@@ -45,7 +45,7 @@ def get_args():
     parser.add_argument("--train_all", default=False, type=bool, help="If true, all network weights will be trained")
     parser.add_argument("--suffix", default="", help="Suffix for the logger")
     parser.add_argument("--nesterov", default=False, type=bool, help="Use nesterov")
-    
+
     return parser.parse_args()
 
 
@@ -59,12 +59,7 @@ class Trainer:
         model = model_factory.get_network(args.network)(jigsaw_classes=args.jigsaw_n_classes + 1, classes=args.n_classes)
         self.model = model.to(device)
         # print(self.model)
-        self.source_loader, self.val_loader = data_helper.get_train_dataloader(args, patches=model.is_patch_based())
-        self.target_loader = data_helper.get_val_dataloader(args, patches=model.is_patch_based())
-        self.test_loaders = {"val": self.val_loader, "test": self.target_loader}
-        self.len_dataloader = len(self.source_loader)
-        print("Dataset size: train %d, val %d, test %d" % (len(self.source_loader.dataset), len(self.val_loader.dataset), len(self.target_loader.dataset)))
-        self.optimizer, self.scheduler = get_optim_and_scheduler(model, args.epochs, args.learning_rate, args.train_all, nesterov=args.nesterov)
+        self.classic_init(args, model)
         self.jig_weight = args.jig_weight
         self.only_non_scrambled = args.classify_only_sane
         self.n_classes = args.n_classes
@@ -72,8 +67,24 @@ class Trainer:
             self.target_id = args.source.index(args.target)
         else:
             self.target_id = None
+        self.optimizer, self.scheduler = get_optim_and_scheduler(self.model, args.epochs, args.learning_rate, args.train_all, nesterov=args.nesterov)
 
-    def _do_epoch(self):
+    def classic_init(self, args):
+        self.source_loader, self.val_loader = data_helper.get_train_dataloader(args, patches=self.model.is_patch_based())
+        self.target_loader = data_helper.get_val_dataloader(args, patches=self.model.is_patch_based())
+        self.test_loaders = {"val": self.val_loader, "test": self.target_loader}
+        self.len_dataloader = len(self.source_loader)
+        print("Dataset size: train %d, val %d, test %d" % (len(self.source_loader.dataset), len(self.val_loader.dataset), len(self.target_loader.dataset)))
+        self.do_epoch = self._classic_epoch
+
+    def combo_init(self, args):
+        self.source_loader, self.jig_loader, self.val_loader = data_helper.get_combo_dataloader(args, patches=self.model.is_patch_based())
+        self.target_loader = data_helper.get_val_dataloader(args, patches=self.model.is_patch_based())
+        self.test_loaders = {"val": self.val_loader, "test": self.target_loader}
+        self.len_dataloader = len(self.source_loader)
+        print("Dataset size: train %d, val %d, test %d" % (len(self.source_loader.dataset), len(self.val_loader.dataset), len(self.target_loader.dataset)))
+
+    def _classic_epoch(self):
         criterion = nn.CrossEntropyLoss()
         self.model.train()
         for it, ((data, jig_l, class_l), d_idx) in enumerate(self.source_loader):
@@ -113,10 +124,8 @@ class Trainer:
             self.logger.log(it, len(self.source_loader),
                             {"jigsaw": jigsaw_loss.item(), "class": class_loss.item()  # , "domain": domain_loss.item()
                              },
-                            # ,"lambda": lambda_val},
                             {"jigsaw": torch.sum(jig_pred == jig_l.data).item(),
                              "class": torch.sum(cls_pred == class_l.data).item(),
-                             # "domain": torch.sum(domain_pred == d_idx.data).item()
                              },
                             data.shape[0])
             del loss, class_loss, jigsaw_loss, jigsaw_logit, class_logit
@@ -135,10 +144,51 @@ class Trainer:
                 self.logger.log_test(phase, {"jigsaw": jigsaw_acc, "class": class_acc})
                 self.results[phase][self.current_epoch] = class_acc
 
+    def _combo_epoch(self):
+        criterion = nn.CrossEntropyLoss()
+        self.model.train()
+        dev = self.device
+        for it, (clean, jigsaw) in enumerate(zip(self.source_loader, self.jig_loader)):
+            ((data, _, class_l), d_idx) = clean
+            ((jdata, jig_l, _), _) = jigsaw
+            data, jdata, jig_l, class_l, d_idx = data.to(dev), jdata.to(dev), jig_l.to(dev), class_l.to(dev), d_idx.to(dev)
+
+            self.optimizer.zero_grad()
+
+            jigsaw_logit, _ = self.model(jdata)
+            _, class_logit = self.model(data)
+            class_loss = criterion(class_logit, class_l)
+            jigsaw_loss = criterion(jigsaw_logit, jig_l)
+            _, cls_pred = class_logit.max(dim=1)
+            _, jig_pred = jigsaw_logit.max(dim=1)
+
+            loss = class_loss + jigsaw_loss * self.jig_weight
+
+            loss.backward()
+            self.optimizer.step()
+
+            self.logger.log(it, len(self.source_loader),
+                            {"jigsaw": jigsaw_loss.item(), "class": class_loss.item()  # , "domain": domain_loss.item()
+                             },
+                            {"jigsaw": torch.sum(jig_pred == jig_l.data).item(),
+                             "class": torch.sum(cls_pred == class_l.data).item(),
+                             },
+                            data.shape[0])
+            del loss, class_loss, jigsaw_loss, jigsaw_logit, class_logit
+
+        self.model.eval()
+        with torch.no_grad():
+            for phase, loader in self.test_loaders.items():
+                total = len(loader.dataset)
+                jigsaw_correct, class_correct = self.do_test(loader)
+                jigsaw_acc = float(jigsaw_correct) / total
+                class_acc = float(class_correct) / total
+                self.logger.log_test(phase, {"jigsaw": jigsaw_acc, "class": class_acc})
+                self.results[phase][self.current_epoch] = class_acc
+
     def do_test(self, loader):
         jigsaw_correct = 0
         class_correct = 0
-        domain_correct = 0
         for it, ((data, jig_l, class_l), _) in enumerate(loader):
             data, jig_l, class_l = data.to(self.device), jig_l.to(self.device), class_l.to(self.device)
             jigsaw_logit, class_logit = self.model(data)
@@ -148,34 +198,13 @@ class Trainer:
             jigsaw_correct += torch.sum(jig_pred == jig_l.data)
         return jigsaw_correct, class_correct
 
-    def do_test_multi(self, loader):
-        jigsaw_correct = 0
-        class_correct = 0
-        single_correct = 0
-        for it, ((data, jig_l, class_l), d_idx) in enumerate(loader):
-            data, jig_l, class_l = data.to(self.device), jig_l.to(self.device), class_l.to(self.device)
-            n_permutations = data.shape[1]
-            class_logits = torch.zeros(n_permutations, data.shape[0], self.n_classes).to(self.device)
-            for k in range(n_permutations):
-                class_logits[k] = F.softmax(self.model(data[:, k])[1], dim=1)
-            class_logits[0] *= 4 * n_permutations  # bias more the original image
-            class_logit = class_logits.mean(0)
-            _, cls_pred = class_logit.max(dim=1)
-            jigsaw_logit, single_logit = self.model(data[:, 0])
-            _, jig_pred = jigsaw_logit.max(dim=1)
-            _, single_logit = single_logit.max(dim=1)
-            single_correct += torch.sum(single_logit == class_l.data)
-            class_correct += torch.sum(cls_pred == class_l.data)
-            jigsaw_correct += torch.sum(jig_pred == jig_l.data[:, 0])
-        return jigsaw_correct, class_correct, single_correct
-
     def do_training(self):
         self.logger = Logger(self.args, ["jigsaw", "class"], update_frequency=30)  # , "domain", "lambda"
         self.results = {"val": torch.zeros(self.args.epochs), "test": torch.zeros(self.args.epochs)}
         for self.current_epoch in range(self.args.epochs):
             self.scheduler.step()
             self.logger.new_epoch(self.scheduler.get_lr())
-            self._do_epoch()
+            self.do_epoch()
         val_res = self.results["val"]
         test_res = self.results["test"]
         idx_best = val_res.argmax()

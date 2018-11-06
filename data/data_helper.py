@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from data import StandardDataset
-from data.JigsawLoader import JigsawDataset, JigsawTestDataset, get_split_dataset_info, _dataset_info, JigsawTestDatasetMultiple
+from data.JigsawLoader import JigsawDataset, SimpleDataset, get_split_dataset_info, _dataset_info, JigsawTestDatasetMultiple
 from data.concat_dataset import ConcatDataset
 
 mnist = 'mnist'
@@ -67,8 +67,8 @@ def get_train_dataloader(args, patches):
             train_dataset = Subset(train_dataset, limit)
         datasets.append(train_dataset)
         val_datasets.append(
-            JigsawTestDataset(name_val, labels_val, img_transformer=get_val_transformer(args),
-                              patches=patches, jig_classes=args.jigsaw_n_classes))
+            SimpleDataset(name_val, labels_val, img_transformer=get_val_transformer(args),
+                          patches=patches, jig_classes=args.jigsaw_n_classes))
     dataset = ConcatDataset(datasets)
     val_dataset = ConcatDataset(val_datasets)
     loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
@@ -79,13 +79,55 @@ def get_train_dataloader(args, patches):
 def get_val_dataloader(args, patches=False):
     names, labels = _dataset_info(join(dirname(__file__), 'txt_lists', '%s_test.txt' % args.target))
     img_tr = get_val_transformer(args)
-    val_dataset = JigsawTestDataset(names, labels, patches=patches, img_transformer=img_tr, jig_classes=args.jigsaw_n_classes)
+    val_dataset = SimpleDataset(names, labels, patches=patches, img_transformer=img_tr, jig_classes=args.jigsaw_n_classes)
     if args.limit_target and len(val_dataset) > args.limit_target:
         val_dataset = Subset(val_dataset, args.limit_target)
         print("Using %d subset of val dataset" % args.limit_target)
     dataset = ConcatDataset([val_dataset])
     loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True, drop_last=False)
     return loader
+
+
+def get_combo_dataloader(args, patches):
+    dataset_list = args.source
+    assert isinstance(dataset_list, list)
+    jig_datasets = []
+    img_datasets = []
+    val_datasets = []
+    jig_transformer, tile_transformer = get_train_transformers(args)
+    img_transformer = transforms.Compose(
+        jig_transformer.transforms + [transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    limit = args.limit_source
+    jig_classes = args.jigsaw_n_classes
+    for dname in dataset_list:
+        name_train, _, labels_train, _ = get_split_dataset_info(join(dirname(__file__), 'txt_lists', '%s_train.txt' % dname), args.val_size)
+        jig_train_dataset = JigsawDataset(name_train, labels_train, patches=patches, img_transformer=img_transformer,
+                                          tile_transformer=tile_transformer, jig_classes=jig_classes, bias_whole_image=args.bias_whole_image)
+        if limit:
+            raise "Not implemented yet"
+        jig_datasets.append(jig_train_dataset)
+
+    if args.target in args.source:
+        k = args.source.index(args.target)
+        classification_dataset_list = dataset_list[:k] + dataset_list[k + 1:]
+    else:
+        classification_dataset_list = dataset_list
+    for dname in classification_dataset_list:
+        name_train, name_val, labels_train, labels_val = get_split_dataset_info(join(dirname(__file__), 'txt_lists', '%s_train.txt' % dname), args.val_size)
+        img_dataset = SimpleDataset(name_train, labels_train, img_transformer=img_transformer, patches=patches, jig_classes=jig_classes)
+        if limit:
+            raise "Not implemented yet"
+        img_datasets.append(img_dataset)
+        val_datasets.append(
+            SimpleDataset(name_val, labels_val, img_transformer=get_val_transformer(args),
+                          patches=patches, jig_classes=jig_classes))
+    jig_loader = torch.utils.data.DataLoader(ConcatDataset(jig_datasets), batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True,
+                                             drop_last=True)
+    img_loader = torch.utils.data.DataLoader(ConcatDataset(img_datasets), batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True,
+                                             drop_last=True)
+    val_loader = torch.utils.data.DataLoader(ConcatDataset(val_datasets), batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True,
+                                             drop_last=False)
+    return img_loader, jig_loader, val_loader
 
 
 def get_train_transformers(args):

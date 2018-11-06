@@ -109,7 +109,7 @@ class JigsawDataset(data.Dataset):
         return all_perm
 
 
-class JigsawTestDataset(JigsawDataset):
+class SimpleDataset(JigsawDataset):
     def __init__(self, *args, **xargs):
         super().__init__(*args, **xargs)
 
