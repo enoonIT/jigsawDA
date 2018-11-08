@@ -3,6 +3,7 @@ import torch
 import torch.utils.data as data
 import torchvision
 import torchvision.transforms as transforms
+from IPython.core.debugger import set_trace
 from PIL import Image
 from random import sample, random
 
@@ -45,7 +46,7 @@ def get_split_dataset_info(txt_list, val_percentage):
 
 
 class JigsawDataset(data.Dataset):
-    def __init__(self, names, labels, jig_classes=100, img_transformer=None, tile_transformer=None, patches=True, bias_whole_image=None):
+    def __init__(self, names, labels, jig_classes=100, img_transformer=None, tile_transformer=None, post_transformer=None, patches=True, bias_whole_image=None):
         self.data_path = ""
         self.names = names
         self.labels = labels
@@ -58,11 +59,13 @@ class JigsawDataset(data.Dataset):
             self.patch_size = 64
         self._image_transformer = img_transformer
         self._augment_tile = tile_transformer
+        self.post = post_transformer
         if patches:
             self.returnFunc = lambda x: x
         else:
             def make_grid(x):
                 return torchvision.utils.make_grid(x, self.grid_size, padding=0)
+
             self.returnFunc = make_grid
 
     def get_tile(self, img, n):
@@ -72,12 +75,12 @@ class JigsawDataset(data.Dataset):
         tile = img.crop([x * w, y * w, (x + 1) * w, (y + 1) * w])
         tile = self._augment_tile(tile)
         return tile
-    
+
     def get_image(self, index):
         framename = self.data_path + '/' + self.names[index]
         img = Image.open(framename).convert('RGB')
         return self._image_transformer(img)
-        
+
     def __getitem__(self, index):
         img = self.get_image(index)
         n_grids = self.grid_size ** 2
@@ -93,9 +96,9 @@ class JigsawDataset(data.Dataset):
             data = tiles
         else:
             data = [tiles[self.permutations[order - 1][t]] for t in range(n_grids)]
-            
+
         data = torch.stack(data, 0)
-        return self.returnFunc(data), int(order), int(self.labels[index])
+        return self.post(self.returnFunc(data)), int(order), int(self.labels[index])
 
     def __len__(self):
         return len(self.names)
@@ -152,11 +155,11 @@ class JigsawTestDatasetMultiple(JigsawDataset):
             tile = img.crop([x * w, y * w, (x + 1) * w, (y + 1) * w])
             tile = self._augment_tile(tile)
             tiles[n] = tile
-        for order in range(0, len(self.permutations)+1, 3):
-            if order==0:
+        for order in range(0, len(self.permutations) + 1, 3):
+            if order == 0:
                 data = tiles
             else:
-                data = [tiles[self.permutations[order-1][t]] for t in range(n_grids)]
+                data = [tiles[self.permutations[order - 1][t]] for t in range(n_grids)]
             data = self.returnFunc(torch.stack(data, 0))
             images.append(data)
             jig_labels.append(order)

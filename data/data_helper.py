@@ -57,12 +57,12 @@ def get_train_dataloader(args, patches):
     assert isinstance(dataset_list, list)
     datasets = []
     val_datasets = []
-    img_transformer, tile_transformer = get_train_transformers(args)
+    img_transformer, tile_transformer, post_transformer = get_train_transformers(args)
     limit = args.limit_source
     for dname in dataset_list:
         name_train, name_val, labels_train, labels_val = get_split_dataset_info(join(dirname(__file__), 'txt_lists', '%s_train.txt' % dname), args.val_size)
         train_dataset = JigsawDataset(name_train, labels_train, patches=patches, img_transformer=img_transformer,
-                                      tile_transformer=tile_transformer, jig_classes=args.jigsaw_n_classes, bias_whole_image=args.bias_whole_image)
+                                      tile_transformer=tile_transformer, post_transformer=post_transformer, jig_classes=args.jigsaw_n_classes, bias_whole_image=args.bias_whole_image)
         if limit:
             train_dataset = Subset(train_dataset, limit)
         datasets.append(train_dataset)
@@ -98,9 +98,11 @@ def get_train_transformers(args):
     tile_tr = []
     if args.tile_random_grayscale:
         tile_tr.append(transforms.RandomGrayscale(args.tile_random_grayscale))
-    tile_tr = tile_tr + [transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]
+    tile_tr.append(transforms.ToTensor())
+    post_tr = [transforms.ToPILImage(), transforms.Resize(224), transforms.ToTensor(),
+               transforms.Normalize([0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]
 
-    return transforms.Compose(img_tr), transforms.Compose(tile_tr)
+    return transforms.Compose(img_tr), transforms.Compose(tile_tr), transforms.Compose(post_tr)
 
 
 def get_val_transformer(args):
